@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"testing"
 	"time"
 )
@@ -121,6 +122,56 @@ func TestServerClose(t *testing.T) {
 		return
 	case <-s.getDoneChan():
 		<-clientDoneChan
+		return
+	}
+}
+
+func TestServerHandshakeTimeout(t *testing.T) {
+	testFail := make(chan error)
+
+	l := newLocalListener()
+	testBytes := []byte("Hello world\n")
+	s := &Server{
+		Handler: func(s Session) {
+			s.Write(testBytes)
+		},
+		HandshakeTimeout: time.Duration(50 * time.Millisecond),
+	}
+	go func() {
+		err := s.Serve(l)
+		if err != nil && err != ErrServerClosed {
+			testFail <- err
+		}
+	}()
+
+	conn, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	connClosedChan := make(chan struct{})
+	go func() {
+		b := make([]byte, 20)
+		defer close(connClosedChan)
+		defer conn.Close()
+		// io.EOF signals the connection was closed by the server
+		for _, err := conn.Read(b); err != io.EOF; _, err = conn.Read(b) {
+		}
+	}()
+
+	timeout := time.After(1 * time.Second)
+	select {
+	case err := <-testFail:
+		t.Fatalf("test failed: %v", err)
+		return
+	case <-timeout:
+		t.Fatal("timeout")
+		return
+	case <-connClosedChan:
+		err := s.Shutdown(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
 		return
 	}
 }
